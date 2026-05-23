@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <radialGradient id="bg" cx="30%" cy="30%">
+      <stop offset="0%" stop-color="#FFE4EE"/>
+      <stop offset="100%" stop-color="#F5EEF8"/>
+    </radialGradient>
+  </defs>
+  <rect width="512" height="512" rx="112.64" fill="url(#bg)"/>
+  <text x="50%" y="54%" font-size="266.24" text-anchor="middle" dominant-baseline="middle">✿</text>
+  <text x="50%" y="83%" font-size="81.92" text-anchor="middle" dominant-baseline="middle" fill="#FFB7C5" font-weight="bold" font-family="sans-serif">Planner</text>
+</svg>
