@@ -172,7 +172,7 @@ const initialJobs=[
 const dateKey=(d)=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
 
 // テンプレから日付範囲にイベント展開（当月分）
-function applyTemplates(events,templates,year,month){
+function applyTemplates(events,templates,year,month,deletedInstances=[]){
   const result={...events};
   const daysInMonth=new Date(year,month+1,0).getDate();
   for(let d=1;d<=daysInMonth;d++){
@@ -182,8 +182,9 @@ function applyTemplates(events,templates,year,month){
     templates.forEach(tmpl=>{
       if(tmpl.dayOfWeek===dow){
         const existing=result[key]||[];
-        // 同じテンプレIDがすでに展開済みか確認
-        if(!existing.find(e=>e.templateId===tmpl.id)){
+        const instanceKey=`${tmpl.id}-${key}`;
+        // 削除済み or すでに展開済みならスキップ
+        if(!deletedInstances.includes(instanceKey)&&!existing.find(e=>e.templateId===tmpl.id)){
           result[key]=[...existing,{
             id:`tmpl-${tmpl.id}-${key}`,
             templateId:tmpl.id,
@@ -235,6 +236,7 @@ export default function App(){
   const [selectedDate,setSelectedDate]=useState(new Date());
   const [baseEvents,setBaseEvents]=useSharedStorage("mp_events",initialEvents);
   const [templates,setTemplates]=useSharedStorage("mp_templates",initialTemplates);
+  const [deletedTemplateInstances,setDeletedTemplateInstances]=useSharedStorage("mp_deletedTmpl",[]);
   const [goals,setGoals]=useSharedStorage("mp_goals",initialGoals);
   const [reports,setReports]=useSharedStorage("mp_reports",initialReports);
   const [editReport,setEditReport]=useState(null);
@@ -252,9 +254,45 @@ export default function App(){
   const [eventModal,setEventModal]=useState(null); // null | {date, event|null}
 
   // テンプレを現在月に適用したイベントマップ
-  const events=applyTemplates(baseEvents,templates,currentDate.getFullYear(),currentDate.getMonth());
+  const events=applyTemplates(baseEvents,templates,currentDate.getFullYear(),currentDate.getMonth(),deletedTemplateInstances);
 
   const todayReport=reports[dateKey(selectedDate)]||{mood:"😊",good:"",improve:"",tomorrow:""};
+
+  // ── リマインド通知 ──────────────────────────────────
+  const notifiedRef=useRef(new Set());
+  useEffect(()=>{
+    if("Notification" in window&&Notification.permission==="default"){
+      Notification.requestPermission();
+    }
+  },[]);
+  useEffect(()=>{
+    const check=()=>{
+      if(!("Notification" in window)||Notification.permission!=="granted")return;
+      const now=new Date();
+      const todayKey=dateKey(now);
+      const todayEvs=events[todayKey]||[];
+      const nowMins=now.getHours()*60+now.getMinutes();
+      todayEvs.forEach(ev=>{
+        if(ev.reminderMins==null||ev.allDay)return;
+        const startM=typeof ev.start==="number"&&ev.start<100?ev.start*60:ev.start;
+        const reminderTime=startM-ev.reminderMins;
+        const notifKey=`${todayKey}-${ev.id}-${ev.reminderMins}`;
+        if(nowMins>=reminderTime&&nowMins<reminderTime+2&&!notifiedRef.current.has(notifKey)){
+          notifiedRef.current.add(notifKey);
+          const label=ev.reminderMins===0?"が始まります":`まで${ev.reminderMins < 60 ? ev.reminderMins+"分前" : (ev.reminderMins/60)+"時間前"}です`;
+          try{
+            new Notification(`⏰ ${ev.title}${label}`,{
+              body:`${fmtTime(startM)} 〜 ${fmtTime(typeof ev.end==="number"&&ev.end<100?ev.end*60:ev.end)}${ev.memo?"\n"+ev.memo:""}`,
+              icon:"/icon-192.png",
+            });
+          }catch(e){}
+        }
+      });
+    };
+    check();
+    const id=setInterval(check,60000);
+    return()=>clearInterval(id);
+  },[events]);
 
   const openAddEvent=(date,existingEvent=null)=>{
     setEventModal({date,event:existingEvent||{title:"",start:9,end:10,color:PASTEL.pink,memo:"",repeat:false}});
@@ -266,8 +304,17 @@ export default function App(){
     const updated={...baseEvents};
     if(!updated[key])updated[key]=[];
     if(modal.event.id){
-      // edit
-      updated[key]=updated[key].map(e=>e.id===modal.event.id?modal.event:e);
+      if(modal.event.templateId){
+        // テンプレ予定を編集→インスタンス削除してregularイベントとして保存
+        const instanceKey=`${modal.event.templateId}-${key}`;
+        if(!deletedTemplateInstances.includes(instanceKey)){
+          setDeletedTemplateInstances([...deletedTemplateInstances,instanceKey]);
+        }
+        const {templateId,...rest}=modal.event;
+        updated[key]=[...updated[key],{...rest,id:Date.now()}];
+      } else {
+        updated[key]=updated[key].map(e=>e.id===modal.event.id?modal.event:e);
+      }
     } else {
       updated[key]=[...updated[key],{...modal.event,id:Date.now()}];
     }
@@ -277,8 +324,19 @@ export default function App(){
 
   const deleteEvent=(dateObj,eventId)=>{
     const key=dateKey(dateObj);
-    const updated={...baseEvents,[key]:(baseEvents[key]||[]).filter(e=>e.id!==eventId)};
-    setBaseEvents(updated);
+    // テンプレ予定かどうか確認
+    const mergedDay=events[key]||[];
+    const target=mergedDay.find(e=>e.id===eventId);
+    if(target&&target.templateId){
+      // テンプレインスタンスを削除リストに追加
+      const instanceKey=`${target.templateId}-${key}`;
+      if(!deletedTemplateInstances.includes(instanceKey)){
+        setDeletedTemplateInstances([...deletedTemplateInstances,instanceKey]);
+      }
+    } else {
+      const updated={...baseEvents,[key]:(baseEvents[key]||[]).filter(e=>e.id!==eventId)};
+      setBaseEvents(updated);
+    }
     setEventModal(null);
   };
 
@@ -478,6 +536,17 @@ function EventModal({modal,setModal,onSave,onDelete}){
         <label style={{fontSize:11,color:PASTEL.mid,display:"block",marginBottom:4}}>📝 メモ</label>
         <textarea value={ev.memo||""} onChange={e=>setEv({...ev,memo:e.target.value})} placeholder="場所・メモなど..." rows={2}
           style={{width:"100%",boxSizing:"border-box",resize:"none",marginBottom:12}}/>
+
+        <label style={{fontSize:11,color:PASTEL.mid,display:"block",marginBottom:4}}>🔔 リマインド</label>
+        <select value={ev.reminderMins??""} onChange={e=>setEv({...ev,reminderMins:e.target.value===""?null:+e.target.value})}
+          style={{width:"100%",marginBottom:12}}>
+          <option value="">なし</option>
+          <option value="0">予定の時刻</option>
+          <option value="5">5分前</option>
+          <option value="15">15分前</option>
+          <option value="30">30分前</option>
+          <option value="60">1時間前</option>
+        </select>
 
         <label style={{fontSize:11,color:PASTEL.mid,display:"block",marginBottom:6}}>🎨 カラー</label>
         <div style={{display:"flex",gap:8,marginBottom:20}}>
